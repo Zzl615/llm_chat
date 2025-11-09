@@ -7,32 +7,45 @@
 package main
 
 import (
-	"llm-chat/internal"
+	applicationService "llm-chat/application/service"
+	domainService "llm-chat/domain/service"
+	"llm-chat/infrastructure/queue"
+	infraRepo "llm-chat/infrastructure/repository"
+	httpRouter "llm-chat/interface/http"
+	"llm-chat/interface/sse"
+	"llm-chat/interface/websocket"
 	"log"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	// 初始化基础设施层
+	sessionRepo := infraRepo.NewSessionRepositoryImpl()
+	messageQueue := queue.NewMockQueue()
+
+	// 启动消息队列工作协程
+	if err := messageQueue.StartWorker(); err != nil {
+		log.Fatalf("Failed to start message queue worker: %v", err)
+	}
+
+	// 初始化领域层
+	domainSessionService := domainService.NewSessionService(sessionRepo)
+
+	// 初始化应用层
+	sessionAppService := applicationService.NewSessionApplicationService(domainSessionService, sessionRepo)
+	chatAppService := applicationService.NewChatApplicationService(sessionRepo, messageQueue)
+
+	// 注意：消息队列的结果订阅在SSE处理器中完成
+	// 每个SSE连接都会独立订阅消息队列，只接收对应会话的消息
+
+	// 初始化接口层
+	wsHandler := websocket.NewHandler(chatAppService, sessionAppService)
+	sseHandler := sse.NewHandler(sessionRepo, messageQueue)
+
+	// 注册路由
 	r := gin.Default()
-	manager := internal.NewManager()
-	queue := internal.NewMockQueue()
-
-	// 启动模拟的模型推理流
-	queue.StartMockModelWorker()
-
-	// 模型结果订阅：将结果投递给对应 session
-	queue.SubscribeResults(func(res *internal.Result) {
-		if sess, ok := manager.Get(res.SessionID); ok {
-			select {
-			case sess.Send <- []byte(res.Chunk):
-			default:
-				log.Printf("[WARN] session %s send buffer full, drop chunk", res.SessionID)
-			}
-		}
-	})
-
-	internal.RegisterRoutes(r, manager, queue)
+	httpRouter.RegisterRoutes(r, wsHandler, sseHandler)
 
 	log.Println("🚀 Chat demo server started at :8080")
 	r.Run(":8080")

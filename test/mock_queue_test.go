@@ -8,31 +8,35 @@ package test
 
 import (
 	"fmt"
-	"llm-chat/internal"
+	"llm-chat/domain/valueobject"
+	"llm-chat/infrastructure/queue"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestNewMockQueue(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := queue.NewMockQueue()
 	if mq == nil {
 		t.Fatal("NewMockQueue returned nil")
 	}
 }
 
 func TestPublishRequest(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := queue.NewMockQueue()
 
-	req := &internal.Request{
-		SessionID: "test-session-1",
-		Content:   "Hello, world!",
+	sessionID, err := valueobject.NewSessionID("test-session-1")
+	if err != nil {
+		t.Fatalf("Failed to create session ID: %v", err)
 	}
 
 	// 测试发布请求不会阻塞
 	done := make(chan bool)
 	go func() {
-		mq.PublishRequest(req)
+		err := mq.PublishRequest(sessionID, "Hello, world!")
+		if err != nil {
+			t.Errorf("PublishRequest failed: %v", err)
+		}
 		done <- true
 	}()
 
@@ -45,28 +49,43 @@ func TestPublishRequest(t *testing.T) {
 }
 
 func TestStartMockModelWorker(t *testing.T) {
-	mq := internal.NewMockQueue()
-	mq.StartMockModelWorker()
+	mq := queue.NewMockQueue()
+	err := mq.StartWorker()
+	if err != nil {
+		t.Fatalf("StartWorker failed: %v", err)
+	}
 
 	// 等待 worker 启动
 	time.Sleep(100 * time.Millisecond)
 
+	sessionID, err := valueobject.NewSessionID("test-session-2")
+	if err != nil {
+		t.Fatalf("Failed to create session ID: %v", err)
+	}
+
 	// 发布一个请求
-	mq.PublishRequest(&internal.Request{
-		SessionID: "test-session-2",
-		Content:   "Test message",
-	})
+	err = mq.PublishRequest(sessionID, "Test message")
+	if err != nil {
+		t.Fatalf("PublishRequest failed: %v", err)
+	}
 
 	// 订阅结果
-	results := make([]*internal.Result, 0)
+	results := make([]result, 0)
 	done := make(chan bool)
 
-	mq.SubscribeResults(func(res *internal.Result) {
-		results = append(results, res)
-		if res.IsLast {
+	err = mq.SubscribeResults(func(id valueobject.SessionID, chunk string, isLast bool) {
+		results = append(results, result{
+			SessionID: id.Value(),
+			Chunk:     chunk,
+			IsLast:    isLast,
+		})
+		if isLast {
 			done <- true
 		}
 	})
+	if err != nil {
+		t.Fatalf("SubscribeResults failed: %v", err)
+	}
 
 	// 等待所有结果（5个chunk）
 	select {
@@ -88,36 +107,57 @@ func TestStartMockModelWorker(t *testing.T) {
 	}
 }
 
+type result struct {
+	SessionID string
+	Chunk     string
+	IsLast    bool
+}
+
 func TestMultipleRequests(t *testing.T) {
-	mq := internal.NewMockQueue()
-	mq.StartMockModelWorker()
+	mq := queue.NewMockQueue()
+	err := mq.StartWorker()
+	if err != nil {
+		t.Fatalf("StartWorker failed: %v", err)
+	}
 
 	// 等待 worker 启动
 	time.Sleep(100 * time.Millisecond)
 
 	// 收集所有结果（在发布请求之前先订阅）
-	resultMap := make(map[string][]*internal.Result)
+	resultMap := make(map[string][]result)
 	var mu sync.Mutex
 	completedSessions := make(map[string]bool)
 	done := make(chan string, 3) // 3个session，每个5个chunk，最后一个是IsLast
 
-	mq.SubscribeResults(func(res *internal.Result) {
+	err = mq.SubscribeResults(func(id valueobject.SessionID, chunk string, isLast bool) {
+		sessionIDStr := id.Value()
 		mu.Lock()
-		resultMap[res.SessionID] = append(resultMap[res.SessionID], res)
-		if res.IsLast && !completedSessions[res.SessionID] {
-			completedSessions[res.SessionID] = true
-			done <- res.SessionID
+		resultMap[sessionIDStr] = append(resultMap[sessionIDStr], result{
+			SessionID: sessionIDStr,
+			Chunk:     chunk,
+			IsLast:    isLast,
+		})
+		if isLast && !completedSessions[sessionIDStr] {
+			completedSessions[sessionIDStr] = true
+			done <- sessionIDStr
 		}
 		mu.Unlock()
 	})
+	if err != nil {
+		t.Fatalf("SubscribeResults failed: %v", err)
+	}
 
 	// 发布多个请求
 	sessionIDs := []string{"session-1", "session-2", "session-3"}
 	for _, sid := range sessionIDs {
-		mq.PublishRequest(&internal.Request{
-			SessionID: sid,
-			Content:   "Message for " + sid,
-		})
+		sessionID, err := valueobject.NewSessionID(sid)
+		if err != nil {
+			t.Fatalf("Failed to create session ID: %v", err)
+		}
+		err = mq.PublishRequest(sessionID, "Message for "+sid)
+		if err != nil {
+			t.Fatalf("PublishRequest failed: %v", err)
+		}
 	}
 
 	// 等待所有session完成（每个请求需要5 * 400ms = 2秒，加上一些缓冲）
@@ -149,8 +189,11 @@ func TestMultipleRequests(t *testing.T) {
 }
 
 func TestConcurrentPublish(t *testing.T) {
-	mq := internal.NewMockQueue()
-	mq.StartMockModelWorker()
+	mq := queue.NewMockQueue()
+	err := mq.StartWorker()
+	if err != nil {
+		t.Fatalf("StartWorker failed: %v", err)
+	}
 
 	// 等待 worker 启动
 	time.Sleep(100 * time.Millisecond)
@@ -161,10 +204,15 @@ func TestConcurrentPublish(t *testing.T) {
 
 	for i := 0; i < numRequests; i++ {
 		go func(id int) {
-			mq.PublishRequest(&internal.Request{
-				SessionID: fmt.Sprintf("concurrent-session-%d", id),
-				Content:   fmt.Sprintf("Message %d", id),
-			})
+			sessionID, err := valueobject.NewSessionID(fmt.Sprintf("concurrent-session-%d", id))
+			if err != nil {
+				t.Errorf("Failed to create session ID: %v", err)
+				return
+			}
+			err = mq.PublishRequest(sessionID, fmt.Sprintf("Message %d", id))
+			if err != nil {
+				t.Errorf("PublishRequest failed: %v", err)
+			}
 			done <- true
 		}(i)
 	}
