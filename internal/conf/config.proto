@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package conf;
+
+option go_package = "llm-chat/internal/conf;conf";
+
+import "google/protobuf/duration.proto";
+
+message Bootstrap {
+  Server server = 1;
+}
+
+message Server {
+  HTTP http = 1;
+}
+
+message HTTP {
+  string addr = 1;
+  google.protobuf.Duration timeout = 2;
+}
+

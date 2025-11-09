@@ -8,23 +8,23 @@ package test
 
 import (
 	"fmt"
-	"llm-chat/internal"
+	"llm-chat/internal/biz"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestNewMockQueue(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := biz.NewMockQueue()
 	if mq == nil {
 		t.Fatal("NewMockQueue returned nil")
 	}
 }
 
 func TestPublishRequest(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := biz.NewMockQueue()
 
-	req := &internal.Request{
+	req := &biz.Request{
 		SessionID: "test-session-1",
 		Content:   "Hello, world!",
 	}
@@ -45,23 +45,23 @@ func TestPublishRequest(t *testing.T) {
 }
 
 func TestStartMockModelWorker(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := biz.NewMockQueue()
 	mq.StartMockModelWorker()
 
 	// 等待 worker 启动
 	time.Sleep(100 * time.Millisecond)
 
 	// 发布一个请求
-	mq.PublishRequest(&internal.Request{
+	mq.PublishRequest(&biz.Request{
 		SessionID: "test-session-2",
 		Content:   "Test message",
 	})
 
 	// 订阅结果
-	results := make([]*internal.Result, 0)
+	results := make([]*biz.Result, 0)
 	done := make(chan bool)
 
-	mq.SubscribeResults(func(res *internal.Result) {
+	mq.SubscribeResults(func(res *biz.Result) {
 		results = append(results, res)
 		if res.IsLast {
 			done <- true
@@ -89,19 +89,19 @@ func TestStartMockModelWorker(t *testing.T) {
 }
 
 func TestMultipleRequests(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := biz.NewMockQueue()
 	mq.StartMockModelWorker()
 
 	// 等待 worker 启动
 	time.Sleep(100 * time.Millisecond)
 
 	// 收集所有结果（在发布请求之前先订阅）
-	resultMap := make(map[string][]*internal.Result)
+	resultMap := make(map[string][]*biz.Result)
 	var mu sync.Mutex
 	completedSessions := make(map[string]bool)
 	done := make(chan string, 3) // 3个session，每个5个chunk，最后一个是IsLast
 
-	mq.SubscribeResults(func(res *internal.Result) {
+	mq.SubscribeResults(func(res *biz.Result) {
 		mu.Lock()
 		resultMap[res.SessionID] = append(resultMap[res.SessionID], res)
 		if res.IsLast && !completedSessions[res.SessionID] {
@@ -114,7 +114,7 @@ func TestMultipleRequests(t *testing.T) {
 	// 发布多个请求
 	sessionIDs := []string{"session-1", "session-2", "session-3"}
 	for _, sid := range sessionIDs {
-		mq.PublishRequest(&internal.Request{
+		mq.PublishRequest(&biz.Request{
 			SessionID: sid,
 			Content:   "Message for " + sid,
 		})
@@ -149,7 +149,7 @@ func TestMultipleRequests(t *testing.T) {
 }
 
 func TestConcurrentPublish(t *testing.T) {
-	mq := internal.NewMockQueue()
+	mq := biz.NewMockQueue()
 	mq.StartMockModelWorker()
 
 	// 等待 worker 启动
@@ -161,7 +161,7 @@ func TestConcurrentPublish(t *testing.T) {
 
 	for i := 0; i < numRequests; i++ {
 		go func(id int) {
-			mq.PublishRequest(&internal.Request{
+			mq.PublishRequest(&biz.Request{
 				SessionID: fmt.Sprintf("concurrent-session-%d", id),
 				Content:   fmt.Sprintf("Message %d", id),
 			})
